@@ -18,7 +18,10 @@ param projectSlug string
 @description('Environment tag value.')
 param environmentTag string
 
-var nsgName = 'nsg-${projectSlug}-demo-${environmentTag}'
+// projectSlug is 'nsg-scanner' - it already leads with the CAF 'nsg' type
+// abbreviation, so it is not prepended again (prepending would yield
+// 'nsg-nsg-scanner-demo-dev'). See azure-naming-conventions.md.
+var nsgName = '${projectSlug}-demo-${environmentTag}'
 var vnetName = 'vnet-${projectSlug}-demo-${environmentTag}'
 
 resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {

@@ -37,7 +37,7 @@ All five are `dev` for now (no prod tier exists for personal portfolio tools). T
 | Budget | `budget` | `budget-cost-sentinel-dev` |
 | Virtual network | `vnet` | `vnet-nsg-scanner-demo-dev` |
 | Subnet | `snet` | `snet-workload` (subnets are named by purpose, not the pattern — they're already scoped by their parent vnet) |
-| Network security group | `nsg` | `nsg-nsg-scanner-demo-dev` — the `nsg` abbreviation plus the `nsg-scanner` slug doubles the token; accepted as-is for consistency with the pattern (see caveat below) |
+| Network security group | `nsg` | `nsg-scanner-demo-dev` — the slug `nsg-scanner` already leads with the `nsg` abbreviation, so the token is not repeated (see caveat below) |
 | Custom role definition | *(none)* | `NSG Posture Reader (nsg-scanner-dev)` — role names must be unique tenant-wide, so the env is suffixed in parentheses |
 
 ## Azd environment naming
@@ -72,9 +72,11 @@ resource group. The pattern qualifier for these follows Drift Detector's
 
 - `rg-nsg-scanner-demo-dev`
 - `vnet-nsg-scanner-demo-dev`
-- `nsg-nsg-scanner-demo-dev` — the doubled `nsg-nsg-` reads oddly but is what the
-  pattern produces (abbreviation `nsg` + slug `nsg-scanner`); kept rather than
-  special-cased so the convention stays mechanical.
+- `nsg-scanner-demo-dev` — when the slug already leads with the resource-type
+  abbreviation (here slug `nsg-scanner`, abbreviation `nsg`), the token is not
+  repeated. The mechanical output would be `nsg-nsg-scanner-demo-dev`; the
+  duplicate `nsg-` is collapsed so the name reads as a normally-prefixed NSG
+  next to its `vnet-` and `rg-` siblings.
 
 ## Documentation placeholders (use in every committed file — never the real value)
 

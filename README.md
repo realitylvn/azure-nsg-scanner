@@ -128,7 +128,7 @@ The demo NSG has three internet-facing inbound rules: SSH (22) and RDP (3389),
 which are real misconfigurations, and HTTPS (443), which is benign. A scan:
 
 ```
-NsgExposureFound: 2 exposed rule/port combination(s) across 1 NSG(s) - nsg-nsg-scanner-demo-dev/allow-rdp-from-internet exposes port 3389 to Internet; nsg-nsg-scanner-demo-dev/allow-ssh-from-internet exposes port 22 to Internet
+NsgExposureFound: 2 exposed rule/port combination(s) across 1 NSG(s) - nsg-scanner-demo-dev/allow-rdp-from-internet exposes port 3389 to Internet; nsg-scanner-demo-dev/allow-ssh-from-internet exposes port 22 to Internet
 ```
 
 Port 443 does not appear — the scanner flags the exposed management ports and
