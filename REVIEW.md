@@ -419,8 +419,15 @@ contract: `azure-ops-command-center/docs/status-contract.md`. This project only
   `status.json` URL for valid `schema_version: 1` JSON, then record the real URL
   below. This is one of the four gates for starting project 5.
 
-**Live `$web` endpoint:** _to be filled after the post-merge deploy —
-`https://<storage-account>.z<NN>.web.core.windows.net/status.json`._
+**Live `$web` endpoint:**
+`https://stnsgscannerdevzbv77y.z20.web.core.windows.net/status.json`
+— verified 2026-09-03 after `azd provision` + `azd deploy` from `main`:
+`HTTP 200`, `content-type: application/json`, `schema_version: 1`. A manual
+`POST /admin/functions/nsg_scan` produced `status: "finding"` — the two
+deliberately-flawed demo rules (`allow-ssh-from-internet` :22,
+`allow-rdp-from-internet` :3389 from Internet) on `nsg-nsg-scanner-demo-dev`,
+`alert in cooldown`. The postprovision hook enabled static-website hosting and
+the wildcard `GET` CORS rule landed on the blob service.
 
 ### AZ-900 / AZ-104 domains touched at this checkpoint
 
