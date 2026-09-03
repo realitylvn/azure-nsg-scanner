@@ -116,6 +116,54 @@ def evaluate_exposure(
     return ScanDecision("exposed", findings)
 
 
+def _merge_prefixes(singular, plural):
+    """Azure populates exactly one of the singular ("sourceAddressPrefix") or
+    plural ("sourceAddressPrefixes") form per field. Return a single list with the
+    Nones and empties dropped."""
+    out = []
+    if isinstance(singular, str) and singular:
+        out.append(singular)
+    for p in plural or []:
+        if p:
+            out.append(p)
+    return out
+
+
+def build_nsg_list(rows):
+    """Normalize Azure Resource Graph NSG rows into the flat shape evaluate_exposure
+    consumes. Only custom securityRules are kept; defaultSecurityRules is ignored -
+    none of the platform defaults allow inbound Internet -> a sensitive port."""
+    result = []
+    for row in rows:
+        props = row.get("properties") or {}
+        rules = []
+        for r in props.get("securityRules") or []:
+            rp = r.get("properties") or {}
+            rules.append(
+                {
+                    "name": r.get("name"),
+                    "priority": rp.get("priority"),
+                    "direction": rp.get("direction"),
+                    "access": rp.get("access"),
+                    "protocol": rp.get("protocol"),
+                    "sources": _merge_prefixes(
+                        rp.get("sourceAddressPrefix"), rp.get("sourceAddressPrefixes")
+                    ),
+                    "dest_ports": _merge_prefixes(
+                        rp.get("destinationPortRange"), rp.get("destinationPortRanges")
+                    ),
+                }
+            )
+        result.append(
+            {
+                "name": row.get("name"),
+                "resourceGroup": row.get("resourceGroup"),
+                "rules": rules,
+            }
+        )
+    return result
+
+
 app = func.FunctionApp()
 
 
