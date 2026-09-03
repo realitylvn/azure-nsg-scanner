@@ -151,6 +151,76 @@ RBAC role, and the deliberately-flawed demo target are net-new.
 
 ---
 
+## Checkpoint 3 — Bicep (Tasks 5–8)
+
+- **One `azd up`, two resource groups.** `main.bicep` (`targetScope = 'subscription'`)
+  creates `rg-nsg-scanner-dev` (the scanner) and `rg-nsg-scanner-demo-dev` (the
+  deliberately-flawed target) and deploys a module into each. Drift Detector
+  split its reference target into a separate hand-run deploy because it needed a
+  cross-RG role assignment ordered after that group existed, and because its
+  before/after demo wanted a clean "redeploy = zero drift" one-liner. Neither
+  applies here: the scanner's assignment is subscription-scoped (nothing to order
+  against a demo RG) and the demo's whole point is a first-run finding. `azd down`
+  removes both — stated in the README, not a surprise.
+
+- **Custom single-action role instead of built-in Reader.**
+  `NSG Posture Reader (nsg-scanner-dev)` grants exactly
+  `Microsoft.Network/networkSecurityGroups/read` and nothing else. Built-in
+  `Reader` would grant read on every resource type in the subscription — far more
+  than the scan needs. Subscription scope is the one deliberate width: the scan
+  is subscription-wide by design, which is the genuine self-use case, not scope
+  creep. Built-in `Reader` at subscription scope stays documented as the fallback
+  if the custom action set turns out to be insufficient for Resource Graph
+  (verified live at Task 9).
+
+- **The role assignment is its own module (`rbac.bicep`).** Bicep BCP120 forbids
+  deriving a resource's name from a value not known at the start of the
+  deployment, and the assignment's deterministic `guid()` name uses the
+  Function's principal ID — a `resources.bicep` output. Passing that output into
+  a subscription-scoped nested module lets the name be computed once the value
+  resolves. Same reason Drift Detector kept its assignment in `reference-rbac.bicep`.
+
+- **Deploy-time privilege.** Defining a role and assigning it at subscription
+  scope needs `Owner` or `User Access Administrator`
+  (`Microsoft.Authorization/roleAssignments/write`) — more than the `Contributor`
+  a plain resource deploy needs. Jonathan owns the subscription; noted in README
+  and here so a future reader with only `Contributor` knows why the deploy fails.
+
+- **`principalType: 'ServicePrincipal'`** on the assignment so it doesn't fail on
+  Entra replication lag while the freshly-created managed identity propagates.
+
+- **Demo NSG carries a deliberate true-negative.** Three inbound-Allow-from-Internet
+  rules: SSH (22) and RDP (3389) are genuine misconfigurations the scanner must
+  flag; HTTPS (443) is benign and must *not* be flagged. Without the 443 rule the
+  demo only proves the scanner fires — with it, the demo proves the scanner is
+  selective.
+
+- **Alert queries are string-coupled to the Python trace prefixes.**
+  `alert-exposure` matches `traces | where message startswith "NsgExposureFound:"`,
+  `alert-error` matches `"NsgScannerError:"`. Both scoped to the App Insights
+  resource, not the Log Analytics workspace — only that scope exposes the classic
+  `traces` table alias (Cost Sentinel's first provision failed on exactly this).
+  `groupShortName: 'nsgscanner'` is 10 chars, under the 12-char Action Group limit.
+
+- **CI is validation-only.** `az bicep build` + `pytest`, no cloud credentials, no
+  deploy job — provisioning stays a workstation operation (the standing
+  no-OIDC-pipeline decision). No reference-freshness job: unlike Drift Detector
+  there is no compiled template artifact to keep in sync.
+
+### AZ-900 / AZ-104 domains touched at this checkpoint
+
+- **Virtual networking** — VNet, subnet, NSG association, inbound security rules.
+- **RBAC / custom roles** — `roleDefinitions` with a single `Actions` entry,
+  `assignableScopes`, control-plane scope choice, deploy-time privilege
+  requirements.
+- **IaC / deployment scopes** — subscription-scoped Bicep, resource-group
+  modules, nested-deployment name resolution (BCP120), `azd` parameter binding.
+- **Monitoring** — `scheduledQueryRules` log alerts, Action Groups, alert
+  severity, `autoMitigate`.
+- **Service limits** — Action Group short-name length, storage account name rules.
+
+---
+
 ## Command log
 
 IDs in commands and pasted output are redacted to the placeholders in
@@ -165,3 +235,6 @@ IDs in commands and pasted output are redacted to the placeholders in
 | `.venv\Scripts\pytest tests/test_function_indexes.py -v` | Red then green: the worker-indexing test failed on `ModuleNotFoundError: function_app`, then passed once `function/function_app.py` had the `nsg_scan` timer stub. |
 | `.venv\Scripts\pytest -q` (Tasks 2–4) | Red → green per task: `test_exposure_logic.py` (16), `test_normalization.py` (6), then the full suite at 23 passed after the entrypoint landed. |
 | `python -c "import function_app; function_app.app.get_functions()"` (run from `function/`) | Post-entrypoint worker-indexing check: returns `['nsg_scan']` / `['timerTrigger']` with the new `azure-mgmt-resourcegraph` + `azure-storage-blob` imports resolving. |
+| `az bicep build --file infra/resources.bicep --stdout` | Compiled clean (module scope note expected — `main.bicep` sets `targetScope`). |
+| `az bicep build --file infra/demo.bicep --stdout` | Compiled clean. |
+| `az bicep build --file infra/main.bicep --stdout` | First run: `BCP120` on the role-assignment name (derived from a module output). Fixed by extracting `infra/rbac.bicep`; recompiled clean. |
