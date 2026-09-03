@@ -9,7 +9,7 @@ from function_app import build_nsg_list, evaluate_exposure
 # One Resource Graph row for an NSG that mixes the singular and plural ARM forms
 # and carries a platform default rule that must be ignored.
 ROW = {
-    "name": "nsg-nsg-scanner-demo-dev",
+    "name": "nsg-scanner-demo-dev",
     "resourceGroup": "rg-nsg-scanner-demo-dev",
     "properties": {
         "securityRules": [
@@ -56,7 +56,7 @@ ROW = {
 
 def test_build_nsg_list_flattens_name_and_rg():
     [nsg] = build_nsg_list([ROW])
-    assert nsg["name"] == "nsg-nsg-scanner-demo-dev"
+    assert nsg["name"] == "nsg-scanner-demo-dev"
     assert nsg["resourceGroup"] == "rg-nsg-scanner-demo-dev"
 
 

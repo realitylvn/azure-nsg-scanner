@@ -441,6 +441,47 @@ the wildcard `GET` CORS rule landed on the blob service.
 
 ---
 
+## Checkpoint 7 — demo NSG rename
+
+Post-completion fix, made as its own change. The demo NSG was
+`nsg-nsg-scanner-demo-dev` — the mechanical output of `nsg-<slug>-demo-dev`
+where the slug is itself `nsg-scanner`, so the `nsg` token appeared twice.
+The naming convention originally kept it "rather than special-cased so the
+convention stays mechanical"; that call is reversed. `azure-naming-conventions.md`
+now says: when the slug already leads with the resource-type abbreviation, the
+token is not repeated. New name: **`nsg-scanner-demo-dev`**.
+
+- **Only the NSG changed.** `rg-nsg-scanner-demo-dev` and `vnet-nsg-scanner-demo-dev`
+  never doubled the token — the demo RG and VNet names are untouched.
+- **`infra/demo.bicep`** drops the `nsg-` prefix from the `nsgName` var (one
+  comment line records why). The VNet's subnet references `nsg.id`, so the
+  association follows the recreated resource with no separate edit.
+- **Recreate + delete the orphan.** An NSG's name is its key. `azd provision`
+  creates `nsg-scanner-demo-dev` and re-points the subnet to it, but azd
+  deploys in Incremental mode — `what-if` marks the old
+  `nsg-nsg-scanner-demo-dev` `Ignore`, not `Delete`, so it is left behind.
+  It must be removed explicitly (`az network nsg delete`) after provision, or
+  the subscription-wide scan would keep finding it under the old name.
+- **Checkpoints 4–6 above are left as written.** They record what those runs
+  emitted at the time, under the old name; this section is the correction, not
+  a retroactive edit of the log.
+- **Local verification:** `pytest -q` → all green (`test_normalization.py`
+  fixture + assertions updated to the new name; it was the only test asserting
+  the literal). `az bicep build --file infra/main.bicep` clean.
+- **Live redeploy (from the workstation):** `az deployment sub what-if` to
+  confirm the delete+create is the only network change → `azd provision` →
+  manual `POST /admin/functions/nsg_scan` → `curl` the `$web` `status.json` and
+  confirm `detail.findings[].nsg` reads `nsg-scanner-demo-dev`. Evidence below.
+
+<!-- LIVE EVIDENCE — fill after redeploy:
+`azd provision` recreated the NSG (what-if: 1 delete, 1 create, 1 VNet modify).
+Manual trigger produced `status: "finding"` naming `nsg-scanner-demo-dev/allow-ssh-from-internet`
+:22 and `nsg-scanner-demo-dev/allow-rdp-from-internet` :3389. status.json at
+<URL> verified `schema_version: 1`, findings carry the new name.
+-->
+
+---
+
 ## Command log
 
 IDs in commands and pasted output are redacted to the placeholders in
@@ -476,6 +517,10 @@ IDs in commands and pasted output are redacted to the placeholders in
 | `az bicep build --file infra/main.bicep --stdout` *(checkpoint 6)* | Confirmed the wildcard-GET `cors` block on `blobServices` compiles clean. |
 | `azd provision` + `azd deploy` *(Jonathan, post-merge)* | Applies the CORS change, runs `scripts/enable-static-website.ps1` (postprovision hook) to enable `$web` hosting, then ships the Function change. Verify with `az functionapp function list` — still just `nsg_scan`. |
 | `curl -s https://<account>.z<NN>.web.core.windows.net/status.json` *(Jonathan, post-deploy)* | Rollout gate — valid `schema_version: 1` JSON matching the contract. Paste the real URL into checkpoint 6. |
+| `az deployment sub what-if --template-file infra/main.bicep …` *(checkpoint 7)* | Confirmed the NSG rename is a delete of `nsg-nsg-scanner-demo-dev` + create of `nsg-scanner-demo-dev` + one VNet subnet re-association, nothing else. |
+| `azd provision` *(checkpoint 7)* | Created `nsg-scanner-demo-dev`, re-pointed the demo subnet to it; postprovision static-website hook re-ran idempotently. |
+| `az network nsg delete -g rg-nsg-scanner-demo-dev -n nsg-nsg-scanner-demo-dev` *(checkpoint 7)* | Removed the orphaned old-name NSG left behind by the Incremental-mode deployment. |
+| `curl -X POST …/admin/functions/nsg_scan -H "x-functions-key: ***"` *(checkpoint 7)* | Manual trigger so the next scan re-emits `status.json` with `nsg-scanner-demo-dev` in `detail.findings`. |
 
 ---
 
