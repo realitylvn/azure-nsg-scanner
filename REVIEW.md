@@ -468,17 +468,28 @@ token is not repeated. New name: **`nsg-scanner-demo-dev`**.
 - **Local verification:** `pytest -q` → all green (`test_normalization.py`
   fixture + assertions updated to the new name; it was the only test asserting
   the literal). `az bicep build --file infra/main.bicep` clean.
-- **Live redeploy (from the workstation):** `az deployment sub what-if` to
-  confirm the delete+create is the only network change → `azd provision` →
-  manual `POST /admin/functions/nsg_scan` → `curl` the `$web` `status.json` and
-  confirm `detail.findings[].nsg` reads `nsg-scanner-demo-dev`. Evidence below.
+- **Live redeploy (from the workstation, 2026-09-03).** `what-if` confirmed the
+  network changes were exactly: create `nsg-scanner-demo-dev`, re-point the
+  `snet-workload` subnet to it, old NSG marked `Ignore`. `azd provision`
+  succeeded in ~1 min; `az network nsg list -g rg-nsg-scanner-demo-dev` then
+  showed both NSGs with the subnet pointing at the new one, so
+  `az network nsg delete … -n nsg-nsg-scanner-demo-dev` removed the orphan —
+  list then returned `["nsg-scanner-demo-dev"]` only. `azd` auto-updated
+  `DEMO_NSG_NAME` to `nsg-scanner-demo-dev`.
+- **`status.json` re-emitted with the corrected name.** A manual
+  `POST /admin/functions/nsg_scan` (HTTP 202) produced, at
+  `https://stnsgscannerdevzbv77y.z20.web.core.windows.net/status.json`:
 
-<!-- LIVE EVIDENCE — fill after redeploy:
-`azd provision` recreated the NSG (what-if: 1 delete, 1 create, 1 VNet modify).
-Manual trigger produced `status: "finding"` naming `nsg-scanner-demo-dev/allow-ssh-from-internet`
-:22 and `nsg-scanner-demo-dev/allow-rdp-from-internet` :3389. status.json at
-<URL> verified `schema_version: 1`, findings carry the new name.
--->
+  ```
+  status: "finding"   nsgs_scanned: 1
+  findings:
+    nsg-scanner-demo-dev / allow-rdp-from-internet  port 3389  Internet
+    nsg-scanner-demo-dev / allow-ssh-from-internet  port 22    Internet
+  ```
+
+  `nsgs_scanned: 1` confirms the orphan is gone (not two NSGs). `443` absent —
+  the true-negative check still holds. The dashboard picks this up on its next
+  fetch with no change on its side.
 
 ---
 
