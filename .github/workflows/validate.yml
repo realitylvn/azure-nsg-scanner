@@ -1,0 +1,39 @@
+name: validate
+
+# Validation only - no Azure credentials, no deploy. Provisioning and deployment
+# are done from the workstation with `azd provision` / `azd deploy`. This catches
+# the failure modes that bit this project family: a Bicep template that doesn't
+# compile, and a function that doesn't import (which `azd deploy` reports as
+# success while indexing zero functions).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bicep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build Bicep templates
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          echo "Bicep compiled clean."
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"  # must match linuxFxVersion in infra/resources.bicep
+      - name: Install test + pinned runtime dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run unit tests
+        run: pytest -q
