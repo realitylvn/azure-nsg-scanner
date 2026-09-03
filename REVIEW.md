@@ -280,10 +280,10 @@ RBAC role, and the deliberately-flawed demo target are net-new.
   Cost Sentinel and Drift Detector a checkpoint each; here the write succeeded
   first time.
 
-- **Still pending (Task 10).** The exposure trace and the RBAC/dedupe paths are
-  confirmed live; the alert *email* delivery, the second-run `suppressed` cooldown
-  trace, and a synthetic `NsgScannerError:` injection are the remaining end-to-end
-  checks.
+- **Carried into Task 10.** The exposure trace and the RBAC/dedupe paths are
+  confirmed live here; the alert *email* delivery, the second-run `suppressed`
+  cooldown trace, the synthetic `NsgScannerError:` injection, and `autoMitigate`
+  resolution are verified in Checkpoint 5.
 
 ### AZ-900 / AZ-104 domains touched at this checkpoint
 
@@ -296,6 +296,83 @@ RBAC role, and the deliberately-flawed demo target are net-new.
   data through Resource Graph with a single control-plane action.
 - **Monitoring & diagnostics** — App Insights `traces`, manual function trigger
   via the admin API, verifying deployment by observed behaviour not exit code.
+
+---
+
+## Checkpoint 5 — end-to-end verification (Task 10)
+
+Everything here runs against the live deployment. No code changed in this
+checkpoint.
+
+- **The finding is correct, and correctly selective.** A manual trigger of the
+  deployed function logged to Application Insights:
+
+  ```
+  NsgExposureFound: 2 exposed rule/port combination(s) across 1 NSG(s) -
+  nsg-nsg-scanner-demo-dev/allow-rdp-from-internet exposes port 3389 to Internet;
+  nsg-nsg-scanner-demo-dev/allow-ssh-from-internet exposes port 22 to Internet
+  ```
+
+  Two findings from the demo NSG's three internet-facing rules.
+  `allow-https-from-internet` (443) is absent — the true-negative check. The
+  scanner flags the exposed management ports and leaves the legitimate web rule
+  alone. (First seen at Task 9; re-confirmed here as the Checkpoint 5 baseline.)
+
+- **Trace → alert → email, end to end.** `alert-exposure-nsg-scanner-dev` went to
+  Fired at 03:05:08 UTC against the `NsgExposureFound:` trace at 02:55:30 UTC —
+  about 9.5 minutes, inside the rule's 1-hour evaluation frequency.
+  `actionStatus.isSuppressed: false` on the fired instance, and the Action Group
+  delivered the Sev-3 email to the notification address. It is a stock Log Alerts
+  V2 notification: it carries the rule name, the search query
+  (`traces | where message startswith "NsgExposureFound:"`) and the match count
+  (`Metric value 1`, `Number of violations 1`), not the trace text. The finding
+  detail sits one click away under "View query results". Worth noting because it
+  sets recipient expectations — the email says *something* is exposed and links
+  to *what*.
+
+- **autoMitigate.** The rule is `autoMitigate: true`. No `NsgExposureFound:`
+  trace was logged after 02:55, and the fired alert self-resolved at 05:06:08 UTC
+  — about 71 minutes after the trace aged out of the 1-hour window. Azure
+  log-alert auto-resolution lags the condition clearing by an evaluation period
+  or two; no manual clearing was needed.
+
+- **The cooldown suppresses the second run.** Triggering `nsg_scan` again at
+  04:02 UTC, with `last-alert.json` written 02:55, produced:
+
+  ```
+  NsgScanner: 2 exposed rule/port combination(s) still present but suppressed -
+  last alert was within the 3-day cooldown.
+  ```
+
+  This message does not start with `NsgExposureFound:`, so the exposure alert
+  does not match it and no second email goes out. The exposure is still real; the
+  scanner has already said so once.
+
+- **The scanner-error alert is wired correctly.** A synthetic trace with message
+  `NsgScannerError: synthetic verification` was injected straight into App
+  Insights ingestion (`POST <ingestion-endpoint>/v2/track` with a `MessageData`
+  envelope) at 04:07:21 UTC — no failure was simulated in the running Function.
+  `alert-error-nsg-scanner-dev` (severity 2) went to Fired at 04:56:51 UTC. The
+  higher-severity path that keeps the scanner from silently going dark works
+  against a real trace match.
+
+- **The `no_nsgs` path is test-assured, not live-verified.** The demo NSG is the
+  only network security group in the subscription, so `evaluate_exposure` cannot
+  return `no_nsgs` live without first removing the demo resource group. It is
+  covered by `test_no_nsgs_returns_no_nsgs` and the empty-row normalization test.
+  Tearing down and rebuilding the demo RG to exercise one log line is not worth
+  the provision churn on a live subscription.
+
+### AZ-900 / AZ-104 domains touched at this checkpoint
+
+- **Monitoring** — log-alert evaluation frequency vs. window, `autoMitigate`
+  semantics and resolution lag, Action Group delivery, the Log Alerts V2 email
+  payload (query + count, not row data), the App Insights ingestion API and its
+  `MessageData` envelope.
+- **Operations / reliability** — verifying an alerting chain by watching each
+  transition (trace logged → alert Fired → email received) rather than trusting
+  that a successful deploy implies a working function; testing the failure-path
+  alert without breaking the running system.
 
 ---
 
@@ -324,5 +401,51 @@ IDs in commands and pasted output are redacted to the placeholders in
 | `az functionapp function list -g rg-nsg-scanner-dev -n <FUNCTION_APP_NAME> -o table` | Worker-index check: exactly `nsg_scan`, `timerTrigger`, `0 0 6 * * *`, not disabled. |
 | `az role definition list --custom-role-only true` / `az role assignment list --assignee <PRINCIPAL_ID>` | Confirmed the custom `NSG Posture Reader` role (single action, subscription scope) and its one assignment to the Function's managed identity. |
 | `curl -X POST …/admin/functions/nsg_scan -H "x-functions-key: ***"` | Manual trigger of the deployed timer function (HTTP 202) to verify RBAC live. |
-| `az monitor app-insights query --analytics-query "traces \| where …"` | Retrieved the run's trace: the expected `NsgExposureFound: 2 …` line naming SSH(22) + RDP(3389), 443 absent. |
+| `az monitor app-insights query --analytics-query "traces \| where …"` | Retrieved the run's trace: the expected `NsgExposureFound: 2 …` line naming SSH(22) + RDP(3389), 443 absent. `--offset 3d` is reliable where smaller offset windows returned empty. |
 | `az storage blob show --connection-string *** -c state -n last-alert.json` | Confirmed the dedupe blob was written by the run via the account-key connection string. |
+| `az monitor scheduled-query show -g rg-nsg-scanner-dev -n alert-exposure-nsg-scanner-dev` | Read back the deployed rule — query string, 1-hour window / frequency, `autoMitigate`, App Insights scope — to confirm the Bicep landed as intended. |
+| `az rest GET …/Microsoft.AlertsManagement/alerts?timeRange=1d` | Listed fired alert instances; filtered to the two `nsg-scanner` rules to read `monitorCondition`, fire time, `actionStatus`, resolve time. Both rules fired (exposure 03:05, error 04:56); exposure auto-resolved 05:06. |
+| `curl -X POST …/admin/functions/nsg_scan -H "x-functions-key: ***"` (×2, Task 10) | Manual triggers of the deployed timer function (HTTP 202) — one to re-confirm the finding, one inside the cooldown to confirm suppression. |
+| `az monitor app-insights component show --query connectionString` + `curl -X POST <ingestion-endpoint>/v2/track` | Injected the synthetic `NsgScannerError:` trace via App Insights ingestion to exercise the severity-2 alert without simulating a real failure in the Function. |
+
+---
+
+## Measured cost
+
+The spec commits to recording the alert-rule cost from portal cost analysis
+after deployment. Cost Management had not accrued usage for resources this new at
+the close of the build, and the Cost Management query API was returning `429`
+across the tenant (a known throttle, tracked in the workspace `CLAUDE.md`). So
+this is list-price-derived, not metered:
+
+| Resource | Cost |
+|---|---|
+| Function (Consumption Y1) | ≈30 executions/month against 1M free — **$0** |
+| Storage account (Functions host + `state` blob) | a few KB — **~$0.01–0.03/month** |
+| Log Analytics | one trace/day, under the 5 GB/month free grant — **$0** |
+| Application Insights | routes to the same workspace — **$0** |
+| VNet + subnet + NSG (demo RG) | Azure does not bill for these — **$0** |
+| 2 × `scheduledQueryRules` log-alert rules | the only real line item — low cents/month each at hourly evaluation |
+| Custom role definition + assignment | **$0** |
+
+Estimate if left running and forgotten for a year: **under $0.50 total.** The
+subscription-wide budget guardrail is Cost Sentinel's; this project adds none.
+**Open check:** confirm the metered alert-rule cost on the first unthrottled
+cost-analysis read once a few days of usage have posted.
+
+---
+
+## AZ-900 / AZ-104 domain mapping
+
+Consolidated from the spec, scored against what the build actually exercised.
+
+| Domain | Exercised here |
+|---|---|
+| **Virtual networking** | VNet, subnet, NSG-to-subnet association; inbound security rules (priority, direction, access, protocol, source service tag `Internet`, destination port range); custom rules vs `defaultSecurityRules`. The exposure logic is an applied reading of what an NSG rule means. |
+| **Security** | Internet-facing 22 / 3389 / 1433 / 3306 / 5432 as the canonical misconfiguration; `0.0.0.0/0` / `Internet` inbound as the risk signal; the database ports in the sensitive list as defence in depth. One network layer down from Drift Detector's `allowBlobPublicAccess` example. |
+| **Least-privilege RBAC** | A custom role with a single `Actions` entry, contrasted with built-in `Reader`; written justification for subscription scope; `principalType: 'ServicePrincipal'` for Entra replication lag; the deploy-time `Owner` / `User Access Administrator` requirement. Verified live: the single action is sufficient for Resource Graph enumeration. |
+| **Governance / Azure Resource Graph** | One KQL query for every NSG in the subscription, `skip_token` pagination, RBAC-filtered results; Resource Graph vs. per-resource management SDKs and when each fits. |
+| **Monitoring** | `scheduledQueryRules` log alerts scoped to the App Insights resource (the `traces` alias only exists at that scope); Action Groups and the 12-char short-name limit; `autoMitigate` and its resolution lag; App Insights sampling disabled so the decision trace is never dropped; capped Log Analytics ingestion. |
+| **Service limits & quotas** | `Microsoft.Web` / Y1 Consumption quota family (re-confirmed clear in East US 2); Action Group short-name length; storage account naming rules. |
+| **IaC** | Subscription-scoped Bicep creating two resource groups plus a role definition; resource-group modules; output-to-parameter nested deployment to work around BCP120; `azd` parameter binding; `azd up` as provision + package + deploy. |
+| **Data protection in version control** | `.gitignore` scoped to keep `.azure/` (subscription ID) and `docs/superpowers/` out of history; placeholder tokens for every identifier in every committed file; `git grep` identifier scan before each commit and push. |
