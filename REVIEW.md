@@ -376,6 +376,64 @@ checkpoint.
 
 ---
 
+## Checkpoint 6 — status-contract rollout (2026-09-03)
+
+Part of the portfolio-wide status-contract rollout so the Ops Command Center
+dashboard (project 5) has something to aggregate. Spec:
+`azure-ops-command-center/docs/superpowers/specs/2026-09-03-status-contract-rollout-design.md`;
+contract: `azure-ops-command-center/docs/status-contract.md`. This project only
+*produces* its `status.json`.
+
+- **`build_status_dict` — a pure function**, same discipline as
+  `evaluate_exposure`: a `ScanDecision` (or an error-reason string) plus the scan
+  count and a clock value in, the fixed cross-project contract dict out, no I/O.
+  One `tests/test_status_contract.py` case per outcome — `no_nsgs` / `clean` →
+  `ok`, `exposed` / `suppressed` → `finding`, the Resource Graph failure paths →
+  `error`. `detail` is `{ nsgs_scanned, findings: [{ nsg, rule, port, source }] }`
+  — no `access` field, every finding is an inbound Allow by construction.
+- **`_publish_status` writes to the storage account's `$web` container** over the
+  **account-key connection string** — the same channel the dedupe-state blob
+  uses, not the managed identity (which holds only the single-action
+  `Microsoft.Network/networkSecurityGroups/read` custom role and has no
+  data-plane role here). Best-effort: a publish failure logs a warning and the
+  run continues, exactly like the guarded `_set_last_alert_time`.
+- **`nsg_scan` refactored so every exit path publishes.** The three early-return
+  paths (`AzureError`, the `NsgScannerError` unexpected-query failure, the
+  `build_nsg_list` parse failure) now emit `status: "error"` before returning, so
+  `generated_at` advances on every run and the dashboard's staleness rule can
+  trust it.
+- **Wildcard `GET` CORS on the blob service** (`infra/resources.bicep`). One
+  non-sensitive JSON file already served anonymously; a wildcard origin adds no
+  exposure and avoids a second edit once the dashboard hostname exists.
+- **`$web` static-website hosting enabled by an `azd` postprovision hook**
+  (`scripts/enable-static-website.ps1`), not Bicep — it is a data-plane
+  blob-service setting with no ARM representation. `$web` serves `status.json`
+  anonymously **without** `allowBlobPublicAccess` on the account, the exact
+  exposure class this scanner covers one layer up (NSGs) and the Drift Detector
+  covers at the storage layer.
+- **Local verification:** `pytest -q` → 33 passing (was 23), including
+  `test_function_indexes` (still one `nsg_scan` / `timerTrigger` — the publish is
+  inline, no new trigger). `az bicep build --file infra/main.bicep` clean.
+- **Post-merge (Jonathan, from the workstation):** `azd provision` (applies the
+  CORS change, runs the static-website hook) → `azd deploy` → `curl` the `$web`
+  `status.json` URL for valid `schema_version: 1` JSON, then record the real URL
+  below. This is one of the four gates for starting project 5.
+
+**Live `$web` endpoint:** _to be filled after the post-merge deploy —
+`https://<storage-account>.z<NN>.web.core.windows.net/status.json`._
+
+### AZ-900 / AZ-104 domains touched at this checkpoint
+
+- **Monitoring & observability** — a scheduled workload publishing a
+  machine-readable health snapshot to a schema shared across four projects;
+  staleness derived by the consumer, `schema_version` for forward compatibility.
+- **Storage** — static-website (`$web`) anonymous hosting *without*
+  `allowBlobPublicAccess`; blob-service CORS; the data-plane vs control-plane
+  line is why `$web` is an `azd` hook and CORS is Bicep — one `azd up`, two
+  mechanisms.
+
+---
+
 ## Command log
 
 IDs in commands and pasted output are redacted to the placeholders in
@@ -407,6 +465,10 @@ IDs in commands and pasted output are redacted to the placeholders in
 | `az rest GET …/Microsoft.AlertsManagement/alerts?timeRange=1d` | Listed fired alert instances; filtered to the two `nsg-scanner` rules to read `monitorCondition`, fire time, `actionStatus`, resolve time. Both rules fired (exposure 03:05, error 04:56); exposure auto-resolved 05:06. |
 | `curl -X POST …/admin/functions/nsg_scan -H "x-functions-key: ***"` (×2, Task 10) | Manual triggers of the deployed timer function (HTTP 202) — one to re-confirm the finding, one inside the cooldown to confirm suppression. |
 | `az monitor app-insights component show --query connectionString` + `curl -X POST <ingestion-endpoint>/v2/track` | Injected the synthetic `NsgScannerError:` trace via App Insights ingestion to exercise the severity-2 alert without simulating a real failure in the Function. |
+| `.venv\Scripts\python -m pytest -q` *(checkpoint 6)* | 33 green (was 23) — `test_status_contract.py` covers `build_status_dict` per outcome, `_web_container` / `_publish_status`, and the two `nsg_scan` publish-path cases. |
+| `az bicep build --file infra/main.bicep --stdout` *(checkpoint 6)* | Confirmed the wildcard-GET `cors` block on `blobServices` compiles clean. |
+| `azd provision` + `azd deploy` *(Jonathan, post-merge)* | Applies the CORS change, runs `scripts/enable-static-website.ps1` (postprovision hook) to enable `$web` hosting, then ships the Function change. Verify with `az functionapp function list` — still just `nsg_scan`. |
+| `curl -s https://<account>.z<NN>.web.core.windows.net/status.json` *(Jonathan, post-deploy)* | Rollout gate — valid `schema_version: 1` JSON matching the contract. Paste the real URL into checkpoint 6. |
 
 ---
 

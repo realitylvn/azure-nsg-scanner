@@ -9,7 +9,7 @@ from azure.core.exceptions import AzureError
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.resourcegraph import ResourceGraphClient
 from azure.mgmt.resourcegraph.models import QueryRequest, QueryRequestOptions
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, ContentSettings
 
 # The azure-identity / azure-storage SDKs log every HTTP request at INFO, which
 # buries this function's own one-line decision trace (the thing the Log Alert
@@ -210,6 +210,39 @@ def _state_container():
     return blob_service.get_container_client(os.environ["STATE_CONTAINER_NAME"])
 
 
+STATUS_BLOB_NAME = "status.json"
+WEB_CONTAINER_NAME = "$web"
+
+
+def _web_container():
+    """Container client for the public $web blob, over the same account-key
+    connection string the dedupe-state blob uses - NOT the managed identity,
+    which holds only the network-read custom role and no data-plane role here.
+    Static-website hosting is enabled out of band by
+    scripts/enable-static-website.ps1 (an azd postprovision hook), so $web
+    serves status.json anonymously without allowBlobPublicAccess."""
+    blob_service = BlobServiceClient.from_connection_string(
+        os.environ["STATE_STORAGE_CONNECTION_STRING"]
+    )
+    return blob_service.get_container_client(WEB_CONTAINER_NAME)
+
+
+def _publish_status(status_dict) -> None:
+    """Best-effort publish of status.json to $web. A failure here must never
+    fail the run - same guard as _set_last_alert_time."""
+    try:
+        _web_container().upload_blob(
+            STATUS_BLOB_NAME,
+            json.dumps(status_dict, indent=2),
+            overwrite=True,
+            content_settings=ContentSettings(
+                content_type="application/json", cache_control="max-age=300"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(f"Could not publish status.json: {exc}")
+
+
 def _get_last_alert_time(container):
     blob = container.get_blob_client(STATE_BLOB_NAME)
     if not blob.exists():
@@ -234,6 +267,63 @@ def _set_last_alert_time(container, when):
     blob.upload_blob(json.dumps({"last_alert_utc": when.isoformat()}), overwrite=True)
 
 
+SCHEMA_VERSION = 1
+PROJECT_SLUG = "azure-nsg-scanner"
+REPO_URL = "https://github.com/realitylvn/azure-nsg-scanner"
+
+
+def _status_finding(f):
+    return {"nsg": f.nsg_name, "rule": f.rule_name, "port": f.port, "source": f.source}
+
+
+def _scan_status(decision, nsgs_scanned):
+    """(status, headline, detail) for a completed ScanDecision."""
+    findings = [_status_finding(f) for f in decision.findings]
+    detail = {"nsgs_scanned": nsgs_scanned, "findings": findings}
+    n = len(findings)
+    combo = "combination" if n == 1 else "combinations"
+    if decision.outcome == "no_nsgs":
+        return "ok", "No NSGs in the subscription", detail
+    if decision.outcome == "clean":
+        return "ok", f"{nsgs_scanned} NSG(s) evaluated - 0 exposed rules", detail
+    nsg_count = len({f.nsg_name for f in decision.findings})
+    if decision.outcome == "suppressed":
+        return (
+            "finding",
+            f"{n} exposed rule/port {combo} - alert in cooldown",
+            detail,
+        )
+    return (
+        "finding",
+        f"{n} exposed rule/port {combo} across {nsg_count} NSG(s)",
+        detail,
+    )
+
+
+def build_status_dict(decision, now, *, nsgs_scanned, error_reason=None):
+    """Pure: a ScanDecision (or an error_reason string) plus the scan count and
+    a clock value in, the status.json contract dict out. No I/O."""
+    if error_reason is not None:
+        status, headline, detail = "error", error_reason, {
+            "nsgs_scanned": nsgs_scanned,
+            "findings": [],
+        }
+    else:
+        status, headline, detail = _scan_status(decision, nsgs_scanned)
+    ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "project": PROJECT_SLUG,
+        "cadence": "scheduled-daily",
+        "generated_at": ts,
+        "last_run_at": ts,
+        "status": status,
+        "headline": headline,
+        "detail": detail,
+        "repo_url": REPO_URL,
+    }
+
+
 app = func.FunctionApp()
 
 
@@ -244,6 +334,7 @@ def nsg_scan(timer: func.TimerRequest) -> None:
     cooldown_days = int(os.environ.get("ALERT_COOLDOWN_DAYS", "3"))
 
     credential = DefaultAzureCredential()
+    now = datetime.now(timezone.utc)
 
     try:
         rows = _query_all_nsgs(credential, subscription_id)
@@ -251,18 +342,26 @@ def nsg_scan(timer: func.TimerRequest) -> None:
         # Transient throttle / API error. Log and skip - do NOT prefix, this must
         # not fire the scanner-error alert on a one-off blip.
         logging.error(f"Resource Graph query failed, skipping this run: {exc}")
+        _publish_status(
+            build_status_dict(None, now, nsgs_scanned=0, error_reason="Resource Graph scan failed")
+        )
         return
     except Exception as exc:  # noqa: BLE001 - nothing here may crash the app
         logging.error(f"NsgScannerError: unexpected error querying Resource Graph: {exc}")
+        _publish_status(
+            build_status_dict(None, now, nsgs_scanned=0, error_reason="Resource Graph scan failed")
+        )
         return
 
     try:
         nsgs = build_nsg_list(rows)
     except Exception as exc:  # noqa: BLE001
         logging.error(f"NsgScannerError: could not parse Resource Graph results: {exc}")
+        _publish_status(
+            build_status_dict(None, now, nsgs_scanned=0, error_reason="Resource Graph scan failed")
+        )
         return
 
-    now = datetime.now(timezone.utc)
     container = _state_container()
     last_alert = _read_last_alert_time(container)
 
@@ -299,6 +398,13 @@ def nsg_scan(timer: func.TimerRequest) -> None:
             f"NsgExposureFound: {n} exposed rule/port combination(s) across "
             f"{nsg_count} NSG(s) - {detail}"
         )
+
+    # Publish the run's outcome for the Ops Command Center dashboard. Best-effort:
+    # a publish failure never fails the run. Reached on every non-error path so
+    # generated_at always advances; the early returns above publish status: error.
+    _publish_status(build_status_dict(decision, now, nsgs_scanned=len(nsgs)))
+
+    if decision.outcome == "exposed":
         # The alert is already raised via the trace above. A failure to persist the
         # cooldown timestamp must not fail the run - worst case is a duplicate email.
         try:
