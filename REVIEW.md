@@ -171,7 +171,8 @@ RBAC role, and the deliberately-flawed demo target are net-new.
   is subscription-wide by design, which is the genuine self-use case, not scope
   creep. Built-in `Reader` at subscription scope stays documented as the fallback
   if the custom action set turns out to be insufficient for Resource Graph
-  (verified live at Task 9).
+  (verified live at Task 9 — **the custom role was sufficient; fallback not
+  used**).
 
 - **The role assignment is its own module (`rbac.bicep`).** Bicep BCP120 forbids
   deriving a resource's name from a value not known at the start of the
@@ -221,6 +222,83 @@ RBAC role, and the deliberately-flawed demo target are net-new.
 
 ---
 
+## Checkpoint 4 — provision & deploy (Task 9)
+
+- **Identity gate before any resource creation.** `az account show` confirmed the
+  target is **LVN Subscription** (`<SUBSCRIPTION_ID>`) in tenant `<TENANT_ID>`,
+  signed in as `user@contoso.com` — a *user* account, which matters here because
+  defining a role and assigning it at subscription scope needs `Owner` /
+  `User Access Administrator`, not the `Contributor` a plain resource deploy
+  needs. The identifier scan (`git grep` for GUIDs, `/subscriptions/…` paths,
+  `*.onmicrosoft.com`) returned only the placeholder rows in
+  `azure-naming-conventions.md` — clean before deploy, as required before every
+  push and every provision.
+
+- **Preview before apply.** `azd provision --preview` and a full
+  `az deployment sub what-if` both came back greenfield — 15 creates, zero
+  modifies or deletes, no quota block on the `Microsoft.Web` / Y1 family in
+  East US 2. The subscription-scoped **role assignment** does not appear in
+  what-if output (`Microsoft.Authorization/roleAssignments` is a documented
+  what-if blind spot); it is created by the `rbac.bicep` nested module at deploy
+  time and verified directly afterwards.
+
+- **`azd up` — 1 min 43 s** (provisioning 1:11, function deploy 0:32). One
+  command, both resource groups, all 15 resources, the remote Oryx build, and the
+  function package. No authorization error on the role definition or assignment —
+  the `Owner`-on-subscription prerequisite held.
+
+- **Worker indexed exactly `nsg_scan`.** `az functionapp function list` shows one
+  function, a single `timerTrigger` binding, `schedule: "0 0 6 * * *"`,
+  `runOnStartup: false`, not disabled. This is the check `azd deploy` skips — it
+  reports success even when a broken import registers zero functions (Cost
+  Sentinel hit that twice). The worker loaded the new
+  `azure-mgmt-resourcegraph` / `azure-storage-blob` imports without failure.
+
+- **The custom single-action role works as scoped — no Reader fallback.** This
+  was the one live-verified unknown carried since Checkpoint 3: whether
+  `Microsoft.Network/networkSecurityGroups/read` alone is enough for the
+  Function's managed identity to enumerate NSGs through Azure Resource Graph, or
+  whether Resource Graph needs the broader read surface of built-in `Reader`. A
+  manual trigger of the deployed function produced, in App Insights, exactly:
+
+  ```
+  NsgExposureFound: 2 exposed rule/port combination(s) across 1 NSG(s) -
+  nsg-nsg-scanner-demo-dev/allow-rdp-from-internet exposes port 3389 to Internet;
+  nsg-nsg-scanner-demo-dev/allow-ssh-from-internet exposes port 22 to Internet
+  ```
+
+  The identity read the demo NSG through Resource Graph with no `403` and no
+  empty result. The custom role stands; `infra/main.bicep` is unchanged and there
+  is nothing to commit from this task. Built-in `Reader` at subscription scope
+  remains the documented fallback in Checkpoint 3, now marked "not needed".
+
+- **The account-key dedupe path works.** The same trigger wrote
+  `state/last-alert.json` (54 bytes, timestamped to the run) via
+  `STATE_STORAGE_CONNECTION_STRING` — the account key already present for
+  `AzureWebJobsStorage`, not the managed identity, which holds no data-plane role
+  on the storage account. This is the control-plane-vs-data-plane bug that cost
+  Cost Sentinel and Drift Detector a checkpoint each; here the write succeeded
+  first time.
+
+- **Still pending (Task 10).** The exposure trace and the RBAC/dedupe paths are
+  confirmed live; the alert *email* delivery, the second-run `suppressed` cooldown
+  trace, and a synthetic `NsgScannerError:` injection are the remaining end-to-end
+  checks.
+
+### AZ-900 / AZ-104 domains touched at this checkpoint
+
+- **Provisioning & deployment** — `azd up` (provision + package + deploy in one),
+  ARM what-if as a pre-apply safety check, deployment scopes.
+- **RBAC in practice** — a custom role definition proven sufficient against a
+  real workload; the deploy-time privilege (`Owner` / UAA) that assigning at
+  subscription scope requires.
+- **Managed identity** — system-assigned identity reading cross-resource-group
+  data through Resource Graph with a single control-plane action.
+- **Monitoring & diagnostics** — App Insights `traces`, manual function trigger
+  via the admin API, verifying deployment by observed behaviour not exit code.
+
+---
+
 ## Command log
 
 IDs in commands and pasted output are redacted to the placeholders in
@@ -238,3 +316,13 @@ IDs in commands and pasted output are redacted to the placeholders in
 | `az bicep build --file infra/resources.bicep --stdout` | Compiled clean (module scope note expected — `main.bicep` sets `targetScope`). |
 | `az bicep build --file infra/demo.bicep --stdout` | Compiled clean. |
 | `az bicep build --file infra/main.bicep --stdout` | First run: `BCP120` on the role-assignment name (derived from a module output). Fixed by extracting `infra/rbac.bicep`; recompiled clean. |
+| `az account show` | Confirmed target: LVN Subscription (`<SUBSCRIPTION_ID>`), tenant `<TENANT_ID>`, user `user@contoso.com`. Ran before the azd env was touched. |
+| `azd env new nsg-scanner-dev` + `azd env set AZURE_LOCATION / AZURE_SUBSCRIPTION_ID / NOTIFICATION_EMAIL` | Created and populated the azd environment. Subscription ID and email set from real values locally; they live only in the git-ignored `.azure/` tree. |
+| `azd provision --preview` | Greenfield preview — 2 RGs + function stack + VNet, no quota block. (azd's preview under-reports; see next row.) |
+| `az deployment sub what-if --template-file infra/main.bicep …` | Full pre-apply diff: 15 creates, 0 modify/delete, including the custom role definition and both alert rules. `roleAssignments` not shown (what-if limitation). |
+| `azd up` | Provision + deploy in one, 1 min 43 s. All resources created; function package deployed and built remotely. |
+| `az functionapp function list -g rg-nsg-scanner-dev -n <FUNCTION_APP_NAME> -o table` | Worker-index check: exactly `nsg_scan`, `timerTrigger`, `0 0 6 * * *`, not disabled. |
+| `az role definition list --custom-role-only true` / `az role assignment list --assignee <PRINCIPAL_ID>` | Confirmed the custom `NSG Posture Reader` role (single action, subscription scope) and its one assignment to the Function's managed identity. |
+| `curl -X POST …/admin/functions/nsg_scan -H "x-functions-key: ***"` | Manual trigger of the deployed timer function (HTTP 202) to verify RBAC live. |
+| `az monitor app-insights query --analytics-query "traces \| where …"` | Retrieved the run's trace: the expected `NsgExposureFound: 2 …` line naming SSH(22) + RDP(3389), 443 absent. |
+| `az storage blob show --connection-string *** -c state -n last-alert.json` | Confirmed the dedupe blob was written by the run via the account-key connection string. |
