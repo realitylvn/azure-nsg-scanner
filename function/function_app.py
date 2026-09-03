@@ -334,6 +334,7 @@ def nsg_scan(timer: func.TimerRequest) -> None:
     cooldown_days = int(os.environ.get("ALERT_COOLDOWN_DAYS", "3"))
 
     credential = DefaultAzureCredential()
+    now = datetime.now(timezone.utc)
 
     try:
         rows = _query_all_nsgs(credential, subscription_id)
@@ -341,18 +342,26 @@ def nsg_scan(timer: func.TimerRequest) -> None:
         # Transient throttle / API error. Log and skip - do NOT prefix, this must
         # not fire the scanner-error alert on a one-off blip.
         logging.error(f"Resource Graph query failed, skipping this run: {exc}")
+        _publish_status(
+            build_status_dict(None, now, nsgs_scanned=0, error_reason="Resource Graph scan failed")
+        )
         return
     except Exception as exc:  # noqa: BLE001 - nothing here may crash the app
         logging.error(f"NsgScannerError: unexpected error querying Resource Graph: {exc}")
+        _publish_status(
+            build_status_dict(None, now, nsgs_scanned=0, error_reason="Resource Graph scan failed")
+        )
         return
 
     try:
         nsgs = build_nsg_list(rows)
     except Exception as exc:  # noqa: BLE001
         logging.error(f"NsgScannerError: could not parse Resource Graph results: {exc}")
+        _publish_status(
+            build_status_dict(None, now, nsgs_scanned=0, error_reason="Resource Graph scan failed")
+        )
         return
 
-    now = datetime.now(timezone.utc)
     container = _state_container()
     last_alert = _read_last_alert_time(container)
 
@@ -389,6 +398,13 @@ def nsg_scan(timer: func.TimerRequest) -> None:
             f"NsgExposureFound: {n} exposed rule/port combination(s) across "
             f"{nsg_count} NSG(s) - {detail}"
         )
+
+    # Publish the run's outcome for the Ops Command Center dashboard. Best-effort:
+    # a publish failure never fails the run. Reached on every non-error path so
+    # generated_at always advances; the early returns above publish status: error.
+    _publish_status(build_status_dict(decision, now, nsgs_scanned=len(nsgs)))
+
+    if decision.outcome == "exposed":
         # The alert is already raised via the trace above. A failure to persist the
         # cooldown timestamp must not fail the run - worst case is a duplicate email.
         try:

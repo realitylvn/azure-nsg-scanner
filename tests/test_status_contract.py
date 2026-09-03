@@ -111,3 +111,43 @@ def test_publish_status_swallows_a_storage_failure(monkeypatch):
 
     monkeypatch.setattr(function_app, "_web_container", boom)
     function_app._publish_status({"schema_version": 1})
+
+
+def _wire(monkeypatch, published):
+    import function_app as fa
+
+    monkeypatch.setattr(fa, "DefaultAzureCredential", lambda: object())
+    monkeypatch.setattr(fa, "_state_container", lambda: object())
+    monkeypatch.setattr(fa, "_read_last_alert_time", lambda c: None)
+    monkeypatch.setattr(fa, "_set_last_alert_time", lambda c, w: None)
+    monkeypatch.setattr(fa, "_publish_status", lambda d: published.append(d))
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "00000000-0000-0000-0000-000000000000")
+    return fa
+
+
+def test_nsg_scan_publishes_ok_when_no_nsgs(monkeypatch):
+    published = []
+    fa = _wire(monkeypatch, published)
+    monkeypatch.setattr(fa, "_query_all_nsgs", lambda *a, **k: [])
+
+    fa.nsg_scan(None)
+
+    assert len(published) == 1
+    assert published[0]["status"] == "ok"
+
+
+def test_nsg_scan_publishes_error_when_resource_graph_fails(monkeypatch):
+    from azure.core.exceptions import HttpResponseError
+
+    published = []
+    fa = _wire(monkeypatch, published)
+
+    def boom(*a, **k):
+        raise HttpResponseError("throttled")
+
+    monkeypatch.setattr(fa, "_query_all_nsgs", boom)
+
+    fa.nsg_scan(None)
+
+    assert len(published) == 1
+    assert published[0]["status"] == "error"
